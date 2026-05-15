@@ -1,0 +1,16 @@
+Variant ID,Name,Brand,Category,ABC-Cat,Current,Intransit,Booked,FG,Case Size,Per Day,PDA,Historical Sales,Incoming Stock,Sales
+SKU-1001,Classic Shampoo 200ml,GlowCare,Personal Care,A,120,40,30,500,24,18,17,510,20,290
+SKU-1002,Herbal Shampoo 340ml,GlowCare,Personal Care,A,55,10,15,220,12,14,13,390,0,210
+SKU-1003,Daily Face Wash 100g,GlowCare,Skin Care,B,35,5,8,120,20,11,10,310,0,155
+SKU-1004,Vitamin Serum 30ml,DermEssence,Skin Care,A,20,0,5,60,6,9,8,250,0,120
+SKU-1005,Hydra Lotion 300ml,DermEssence,Skin Care,B,90,20,10,340,24,7,6,210,30,100
+SKU-1006,Baby Soap Twin Pack,TinyNest,Baby Care,B,150,30,40,90,18,12,11,330,0,205
+SKU-1007,Baby Lotion 100ml,TinyNest,Baby Care,C,210,15,20,40,12,4,3,105,0,70
+SKU-1008,Floor Cleaner 1L,HomePro,Home Care,A,70,25,15,600,30,16,15,470,0,260
+SKU-1009,Dishwash Gel 500ml,HomePro,Home Care,B,45,0,5,180,24,10,9,290,0,140
+SKU-1010,Laundry Liquid 2L,HomePro,Home Care,A,25,0,10,75,8,13,12,360,0,170
+SKU-1011,Toothpaste Mint 150g,FreshSmile,Oral Care,A,160,30,20,520,36,19,18,540,0,310
+SKU-1012,Kids Toothpaste 80g,FreshSmile,Oral Care,B,85,20,12,80,24,8,7,215,0,120
+SKU-1013,Protein Bar Choco,NutraGo,Snacks,B,260,40,30,400,48,6,5,170,10,95
+SKU-1014,Granola Mix Honey,NutraGo,Snacks,C,310,20,25,140,24,3,2,82,0,40
+SKU-1015,Energy Drink 250ml,VivaPlus,Beverages,A,65,10,10,900,24,21,20,610,0,355
