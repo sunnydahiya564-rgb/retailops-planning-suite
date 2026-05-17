@@ -112,12 +112,12 @@ def prepare_input_frame(df: pd.DataFrame) -> pd.DataFrame:
     return clean_df
 
 
-def load_uploaded_table(uploaded_file) -> pd.DataFrame:
+def load_uploaded_table(uploaded_file, all_sheets: bool = False):
     if uploaded_file is None:
         raise ValueError("No file was uploaded.")
     file_name = uploaded_file.name.lower()
     if file_name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file)
+        return pd.read_excel(uploaded_file, sheet_name=None if all_sheets else 0)
     if file_name.endswith(".csv"):
         return pd.read_csv(uploaded_file)
     raise ValueError("Unsupported file type. Please upload CSV or Excel.")
@@ -127,6 +127,16 @@ def dataframe_to_excel_bytes(sheet_name: str, df: pd.DataFrame) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
+    output.seek(0)
+    return output.read()
+
+
+def dataframes_to_excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            safe_name = str(sheet_name)[:31] or "Sheet1"
+            df.to_excel(writer, index=False, sheet_name=safe_name)
     output.seek(0)
     return output.read()
 

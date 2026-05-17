@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -46,6 +47,21 @@ HISTORY_COLUMN_ALIASES = {
     "brand": "Brand",
     "category": "Category",
     "name": "Name",
+    "actual sold": "Units Sold",
+    "actual sales": "Units Sold",
+    "actual": "Units Sold",
+    "projection": "Projection Qty",
+    "projection qty": "Projection Qty",
+    "projected units": "Projection Qty",
+    "projected sales": "Projection Qty",
+    "forecast units": "Projection Qty",
+    "forecast qty": "Projection Qty",
+    "previous projection": "Previous Projection",
+    "prev projection": "Previous Projection",
+    "last projection": "Previous Projection",
+    "previous proj": "Previous Projection",
+    "last month projection": "Previous Projection",
+    "projection previous month": "Previous Projection",
 }
 SPECIAL_MONTH_OFFSET_ALIASES = {
     "same month last year": 12,
@@ -57,6 +73,7 @@ SPECIAL_MONTH_OFFSET_ALIASES = {
     "same month 3y": 36,
 }
 HISTORY_ID_COLUMNS = ["Variant ID", "Name", "Brand", "Category"]
+HistoryInput = pd.DataFrame | dict[str, pd.DataFrame]
 
 
 @dataclass
@@ -76,11 +93,74 @@ def normalize_history_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=rename_map)
 
 
+def extract_projection_overrides(history_df: HistoryInput) -> pd.DataFrame:
+    if isinstance(history_df, dict):
+        return pd.DataFrame(columns=["Variant ID", "Previous Projection"])
+    clean_df = normalize_history_columns(history_df.copy())
+    if "Variant ID" not in clean_df.columns or "Previous Projection" not in clean_df.columns:
+        return pd.DataFrame(columns=["Variant ID", "Previous Projection"])
+    projection_df = clean_df[["Variant ID", "Previous Projection"]].copy()
+    projection_df["Variant ID"] = projection_df["Variant ID"].astype(str)
+    projection_df["Previous Projection"] = (
+        pd.to_numeric(projection_df["Previous Projection"], errors="coerce").fillna(0).clip(lower=0)
+    )
+    return projection_df.drop_duplicates(subset=["Variant ID"], keep="last")
+
+
 def _parse_month_header(header: str) -> pd.Timestamp | None:
-    parsed = pd.to_datetime(str(header).strip(), errors="coerce")
+    raw_header = str(header).strip()
+    cleaned = re.sub(r"[_/]+", "-", raw_header)
+    parsed = pd.to_datetime(cleaned, errors="coerce")
+    if pd.isna(parsed):
+        month_match = re.search(r"((?:19|20)\d{2})[- ]?(\d{1,2})", cleaned)
+        if month_match:
+            parsed = pd.to_datetime(
+                f"{month_match.group(1)}-{int(month_match.group(2)):02d}-01",
+                errors="coerce",
+            )
+    if pd.isna(parsed):
+        month_name_match = re.search(r"([A-Za-z]{3,9})[- ]?((?:19|20)?\d{2})", cleaned)
+        if month_name_match:
+            parsed = pd.to_datetime(
+                f"01 {month_name_match.group(1)} {month_name_match.group(2)}",
+                errors="coerce",
+            )
     if pd.isna(parsed):
         return None
     return parsed.to_period("M").to_timestamp()
+
+
+def _convert_multisheet_history_to_long(history_sheets: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    monthly_frames: list[pd.DataFrame] = []
+    for sheet_name, sheet_df in history_sheets.items():
+        sheet_month = _parse_month_header(sheet_name)
+        if sheet_month is None:
+            continue
+        clean_sheet = normalize_history_columns(sheet_df.copy())
+        if "Variant ID" not in clean_sheet.columns:
+            continue
+        if "Units Sold" not in clean_sheet.columns and "Projection Qty" not in clean_sheet.columns:
+            continue
+
+        if "Units Sold" not in clean_sheet.columns:
+            clean_sheet["Units Sold"] = 0
+        if "Projection Qty" not in clean_sheet.columns:
+            clean_sheet["Projection Qty"] = np.nan
+        for column in ["Name", "Brand", "Category"]:
+            if column not in clean_sheet.columns:
+                clean_sheet[column] = "Unknown"
+
+        monthly_part = clean_sheet[
+            ["Variant ID", "Name", "Brand", "Category", "Units Sold", "Projection Qty"]
+        ].copy()
+        monthly_part["Month"] = sheet_month
+        monthly_frames.append(monthly_part)
+
+    if not monthly_frames:
+        raise ValueError(
+            "No valid monthly sheets were detected. Name each worksheet like `2026-04` or `Apr-2026` and include `Variant ID` with `Actual Sold` and/or `Projection`."
+        )
+    return pd.concat(monthly_frames, ignore_index=True)
 
 
 def _convert_wide_history_to_long(history_df: pd.DataFrame) -> pd.DataFrame:
@@ -133,21 +213,27 @@ def _same_month_recent_value(series: pd.Series, target_month: int, rank_from_lat
     return float(same_month_values.iloc[-rank_from_latest])
 
 
-def prepare_history_frame(history_df: pd.DataFrame, sku_frame: pd.DataFrame | None = None) -> pd.DataFrame:
-    clean_df = normalize_history_columns(history_df.copy())
-    if all(column in clean_df.columns for column in HISTORY_REQUIRED_COLUMNS):
-        pass
-    elif "Variant ID" in clean_df.columns:
-        clean_df = _convert_wide_history_to_long(clean_df)
+def prepare_history_frame(history_df: HistoryInput, sku_frame: pd.DataFrame | None = None) -> pd.DataFrame:
+    if isinstance(history_df, dict):
+        clean_df = _convert_multisheet_history_to_long(history_df)
     else:
-        missing_columns = [column for column in HISTORY_REQUIRED_COLUMNS if column not in clean_df.columns]
-        raise ValueError(f"Missing required history columns: {', '.join(missing_columns)}")
+        clean_df = normalize_history_columns(history_df.copy())
+        if all(column in clean_df.columns for column in HISTORY_REQUIRED_COLUMNS):
+            pass
+        elif "Variant ID" in clean_df.columns:
+            clean_df = _convert_wide_history_to_long(clean_df)
+        else:
+            missing_columns = [column for column in HISTORY_REQUIRED_COLUMNS if column not in clean_df.columns]
+            raise ValueError(f"Missing required history columns: {', '.join(missing_columns)}")
 
     clean_df["Month"] = pd.to_datetime(clean_df["Month"], errors="coerce")
     clean_df = clean_df.dropna(subset=["Month"]).copy()
     clean_df["Month"] = clean_df["Month"].dt.to_period("M").dt.to_timestamp()
     clean_df["Variant ID"] = clean_df["Variant ID"].astype(str)
     clean_df["Units Sold"] = pd.to_numeric(clean_df["Units Sold"], errors="coerce").fillna(0).clip(lower=0)
+    if "Projection Qty" not in clean_df.columns:
+        clean_df["Projection Qty"] = np.nan
+    clean_df["Projection Qty"] = pd.to_numeric(clean_df["Projection Qty"], errors="coerce").clip(lower=0)
 
     if sku_frame is not None:
         sku_lookup = sku_frame[["Variant ID", "Name", "Brand", "Category"]].drop_duplicates()
@@ -164,8 +250,13 @@ def prepare_history_frame(history_df: pd.DataFrame, sku_frame: pd.DataFrame | No
         clean_df[column] = clean_df[column].fillna("Unknown").astype(str)
 
     monthly_history = (
-        clean_df.groupby(["Month", "Variant ID", "Name", "Brand", "Category"], as_index=False)["Units Sold"]
-        .sum()
+        clean_df.groupby(["Month", "Variant ID", "Name", "Brand", "Category"], as_index=False)
+        .agg(
+            {
+                "Units Sold": "sum",
+                "Projection Qty": lambda values: values.sum(min_count=1),
+            }
+        )
         .sort_values(["Variant ID", "Month"])
         .reset_index(drop=True)
     )
@@ -237,7 +328,10 @@ def _complete_monthly_history(monthly_history: pd.DataFrame, sku_frame: pd.DataF
 
     all_rows: list[pd.DataFrame] = []
     for _, sku_row in sku_info.iterrows():
-        sku_history = monthly_history[monthly_history["Variant ID"] == sku_row["Variant ID"]][["Month", "Units Sold"]]
+        history_columns = ["Month", "Units Sold"]
+        if "Projection Qty" in monthly_history.columns:
+            history_columns.append("Projection Qty")
+        sku_history = monthly_history[monthly_history["Variant ID"] == sku_row["Variant ID"]][history_columns]
         full_sku = pd.DataFrame({"Month": all_months})
         full_sku["Variant ID"] = sku_row["Variant ID"]
         full_sku["Name"] = sku_row["Name"]
@@ -245,6 +339,8 @@ def _complete_monthly_history(monthly_history: pd.DataFrame, sku_frame: pd.DataF
         full_sku["Category"] = sku_row["Category"]
         full_sku = full_sku.merge(sku_history, on="Month", how="left")
         full_sku["Units Sold"] = full_sku["Units Sold"].fillna(0)
+        if "Projection Qty" not in full_sku.columns:
+            full_sku["Projection Qty"] = np.nan
         all_rows.append(full_sku)
 
     complete_history = pd.concat(all_rows, ignore_index=True)
@@ -269,6 +365,51 @@ def _six_month_trend(series: pd.Series) -> float:
     slope, intercept = np.polyfit(x, tail.to_numpy(dtype=float), 1)
     forecast = intercept + slope * len(tail)
     return float(max(forecast, 0))
+
+
+def _weighted_recent_average(series: pd.Series) -> float:
+    tail = series.tail(6).to_numpy(dtype=float)
+    if len(tail) == 0:
+        return 0.0
+    weights = np.arange(1, len(tail) + 1, dtype=float)
+    return float(np.average(tail, weights=weights))
+
+
+def _seasonal_projection(series: pd.Series, target_month: int) -> float:
+    same_month_last_year = _same_month_recent_value(series, target_month, rank_from_latest=1)
+    if pd.isna(same_month_last_year):
+        return float("nan")
+    recent_3 = series.tail(3).mean() if len(series) >= 1 else 0.0
+    previous_3 = series.iloc[-6:-3].mean() if len(series) >= 6 else recent_3
+    if pd.isna(previous_3) or previous_3 <= 0:
+        growth_factor = 1.0
+    else:
+        growth_factor = float(np.clip(recent_3 / previous_3, 0.75, 1.30))
+    return float(max(same_month_last_year * growth_factor, 0))
+
+
+def _build_projection_bias_lookup(monthly_history: pd.DataFrame) -> pd.DataFrame:
+    if "Projection Qty" not in monthly_history.columns:
+        return pd.DataFrame(columns=["Variant ID", "Projection Bias Factor"])
+    history_with_projection = monthly_history[
+        monthly_history["Projection Qty"].notna() & (monthly_history["Projection Qty"] > 0)
+    ].copy()
+    if history_with_projection.empty:
+        return pd.DataFrame(columns=["Variant ID", "Projection Bias Factor"])
+
+    history_with_projection["Projection Bias"] = np.where(
+        history_with_projection["Projection Qty"] > 0,
+        history_with_projection["Units Sold"] / history_with_projection["Projection Qty"],
+        np.nan,
+    )
+    bias_lookup = (
+        history_with_projection.sort_values("Month")
+        .groupby("Variant ID")["Projection Bias"]
+        .apply(lambda values: float(np.clip(np.nanmedian(values.tail(6)), 0.88, 1.12)))
+        .reset_index()
+        .rename(columns={"Projection Bias": "Projection Bias Factor"})
+    )
+    return bias_lookup
 
 
 def _build_training_frame(monthly_history: pd.DataFrame) -> pd.DataFrame:
@@ -333,7 +474,9 @@ def _build_next_month_feature_frame(monthly_history: pd.DataFrame, sku_frame: pd
             "Days in Next Month": calendar.monthrange(next_month.year, next_month.month)[1],
             "Last Month Sales": float(units_series.iloc[-1]) if not units_series.empty else 0.0,
             "six_month_trend_feature": _six_month_trend(units_series),
+            "recent_weighted_avg": _weighted_recent_average(units_series),
             "same_month_3y_avg": _same_month_average(units_series, next_month.month),
+            "seasonal_projection": _seasonal_projection(units_series, next_month.month),
             "same_month_last_year_sold": _same_month_recent_value(units_series, next_month.month, rank_from_latest=1),
             "same_month_2y_sold": _same_month_recent_value(units_series, next_month.month, rank_from_latest=2),
             "same_month_3y_sold": _same_month_recent_value(units_series, next_month.month, rank_from_latest=3),
@@ -352,19 +495,27 @@ def _build_next_month_feature_frame(monthly_history: pd.DataFrame, sku_frame: pd
 
 def _combine_projection_components(
     ml_value: float | int | np.floating | None,
+    weighted_recent_value: float | int | np.floating | None,
     six_month_value: float | int | np.floating | None,
     seasonal_value: float | int | np.floating | None,
     fallback_units: float,
+    history_month_count: int = 0,
 ) -> tuple[float, str]:
     components = {
-        "ML": (ml_value, 0.45),
-        "6M Trend": (six_month_value, 0.30),
-        "3Y Seasonality": (seasonal_value, 0.25),
+        "ML": (ml_value, 0.34),
+        "Recent Weighted Avg": (weighted_recent_value, 0.28),
+        "6M Trend": (six_month_value, 0.22),
+        "Seasonal Signal": (seasonal_value, 0.16),
     }
+    if history_month_count < 12:
+        components["ML"] = (ml_value, 0.32)
+        components["Recent Weighted Avg"] = (weighted_recent_value, 0.40)
+        components["6M Trend"] = (six_month_value, 0.28)
+        components["Seasonal Signal"] = (seasonal_value, 0.0)
     available_components = {
         name: (float(value), weight)
         for name, (value, weight) in components.items()
-        if value is not None and pd.notna(value) and float(value) >= 0
+        if value is not None and pd.notna(value) and float(value) >= 0 and weight > 0
     }
     if not available_components:
         return max(float(fallback_units), 0.0), "Current per-day fallback"
@@ -496,15 +647,21 @@ def _train_monthly_model(
     return forecast_pred, evaluation_frame, metrics
 
 
-def forecast_next_month(history_df: pd.DataFrame, sku_frame: pd.DataFrame) -> ForecastArtifacts:
+def forecast_next_month(history_df: HistoryInput, sku_frame: pd.DataFrame) -> ForecastArtifacts:
+    upload_projection_lookup = extract_projection_overrides(history_df)
     monthly_history = prepare_history_frame(history_df, sku_frame)
     complete_history = _complete_monthly_history(monthly_history, sku_frame)
     train_df = _build_training_frame(complete_history)
     feature_df, next_month = _build_next_month_feature_frame(monthly_history, sku_frame)
     ml_prediction, evaluation_frame, metrics = _train_monthly_model(train_df, feature_df)
+    bias_lookup = _build_projection_bias_lookup(monthly_history)
+    feature_df = feature_df.merge(bias_lookup, on="Variant ID", how="left")
+    feature_df["Projection Bias Factor"] = feature_df["Projection Bias Factor"].fillna(1.0)
 
     feature_df["Last 6M Trend Forecast"] = feature_df["six_month_trend_feature"].clip(lower=0)
+    feature_df["Recent Weighted Forecast"] = feature_df["recent_weighted_avg"].clip(lower=0)
     feature_df["Same Month 3Y Avg"] = feature_df["same_month_3y_avg"].fillna(feature_df["rolling_6"]).clip(lower=0)
+    feature_df["Seasonal Projection"] = feature_df["seasonal_projection"].fillna(feature_df["Same Month 3Y Avg"]).clip(lower=0)
     feature_df["ML Forecast"] = np.where(np.isnan(ml_prediction), feature_df["rolling_6"], np.clip(ml_prediction, 0, None))
 
     hybrid_forecasts: list[float] = []
@@ -520,12 +677,20 @@ def forecast_next_month(history_df: pd.DataFrame, sku_frame: pd.DataFrame) -> Fo
     for _, row in feature_df.iterrows():
         hybrid_units, basis_label = _combine_projection_components(
             ml_value=row["ML Forecast"],
+            weighted_recent_value=row["Recent Weighted Forecast"],
             six_month_value=row["Last 6M Trend Forecast"],
-            seasonal_value=row["Same Month 3Y Avg"],
+            seasonal_value=row["Seasonal Projection"],
             fallback_units=max(row["Current Per Day"] * row["Days in Next Month"], 0),
+            history_month_count=int(row["history_month_count"]),
         )
+        bias_adjustment = 1 + ((float(row["Projection Bias Factor"]) - 1.0) * 0.35)
+        hybrid_units = max(hybrid_units * float(np.clip(bias_adjustment, 0.93, 1.07)), 0.0)
         hybrid_forecasts.append(hybrid_units)
-        basis_labels.append(basis_label)
+        basis_labels.append(
+            f"{basis_label} + projection history adjustment"
+            if abs(float(row["Projection Bias Factor"]) - 1.0) > 0.015
+            else basis_label
+        )
 
         last_month_sales = max(float(row["Last Month Sales"]), 1.0)
         forecast_growth.append(((hybrid_units - last_month_sales) / last_month_sales) if last_month_sales else 0.0)
@@ -567,19 +732,50 @@ def forecast_next_month(history_df: pd.DataFrame, sku_frame: pd.DataFrame) -> Fo
     )
 
     previous_projection_lookup = (
-        evaluation_frame[["Variant ID", "Month", "Units Sold", "six_month_trend_feature", "same_month_3y_avg", "ml_projection"]]
+        evaluation_frame[["Variant ID", "Month", "Units Sold", "rolling_3", "six_month_trend_feature", "same_month_3y_avg", "ml_projection"]]
         .drop_duplicates(subset=["Variant ID"])
         .copy()
     )
     previous_projection_lookup["Previous Projection"] = previous_projection_lookup.apply(
         lambda row: _combine_projection_components(
             ml_value=row["ml_projection"],
+            weighted_recent_value=row["rolling_3"] if "rolling_3" in row.index else row["six_month_trend_feature"],
             six_month_value=row["six_month_trend_feature"],
             seasonal_value=row["same_month_3y_avg"],
             fallback_units=float(row["Units Sold"]),
         )[0],
         axis=1,
     )
+    if "Projection Qty" in monthly_history.columns:
+        monthly_projection_lookup = monthly_history[
+            ["Variant ID", "Month", "Projection Qty"]
+        ].dropna(subset=["Projection Qty"])
+        previous_projection_lookup = previous_projection_lookup.merge(
+            monthly_projection_lookup,
+            on=["Variant ID", "Month"],
+            how="left",
+        )
+        previous_projection_lookup["Previous Projection"] = np.where(
+            previous_projection_lookup["Projection Qty"].notna()
+            & (previous_projection_lookup["Projection Qty"] > 0),
+            previous_projection_lookup["Projection Qty"],
+            previous_projection_lookup["Previous Projection"],
+        )
+        previous_projection_lookup = previous_projection_lookup.drop(columns=["Projection Qty"])
+    if not upload_projection_lookup.empty:
+        previous_projection_lookup = previous_projection_lookup.merge(
+            upload_projection_lookup,
+            on="Variant ID",
+            how="left",
+            suffixes=("", "_uploaded"),
+        )
+        previous_projection_lookup["Previous Projection"] = np.where(
+            previous_projection_lookup["Previous Projection_uploaded"].notna()
+            & (previous_projection_lookup["Previous Projection_uploaded"] > 0),
+            previous_projection_lookup["Previous Projection_uploaded"],
+            previous_projection_lookup["Previous Projection"],
+        )
+        previous_projection_lookup = previous_projection_lookup.drop(columns=["Previous Projection_uploaded"])
     previous_projection_lookup["Previous Month"] = previous_projection_lookup["Month"].dt.strftime("%b %Y")
     previous_projection_lookup["Actual Sold"] = previous_projection_lookup["Units Sold"]
     previous_projection_lookup["Variance"] = previous_projection_lookup["Actual Sold"] - previous_projection_lookup["Previous Projection"]
@@ -627,6 +823,9 @@ def forecast_next_month(history_df: pd.DataFrame, sku_frame: pd.DataFrame) -> Fo
         "Daily Projection",
         "Forecast Confidence",
         "Forecast Basis",
+        "Projection Bias Factor",
+        "Recent Weighted Forecast",
+        "Seasonal Projection",
         "AI Hybrid Forecast",
         "AI Forecast Per Day",
     ]
@@ -639,7 +838,7 @@ def forecast_next_month(history_df: pd.DataFrame, sku_frame: pd.DataFrame) -> Fo
         {
             "next_month": next_month.strftime("%B %Y"),
             "history_months": int(monthly_history["Month"].nunique()),
-            "forecast_method": "Hybrid 6M + same-month 3Y + ML ensemble",
+            "forecast_method": "Hybrid recent trend + seasonality + ML ensemble",
             "previous_month": previous_projection_lookup["Previous Month"].mode().iloc[0]
             if not previous_projection_lookup.empty
             else "",
@@ -700,6 +899,7 @@ def build_history_template(sku_frame: pd.DataFrame, months_back: int = 36) -> pd
             "Name": row["Name"],
             "Brand": row["Brand"],
             "Category": row["Category"],
+            "Previous Projection": "",
         }
         for month in recent_months:
             template_row[month.strftime("%Y-%m")] = ""
@@ -711,6 +911,20 @@ def build_history_template(sku_frame: pd.DataFrame, months_back: int = 36) -> pd
     template_df = pd.DataFrame(template_rows)
     template_df.attrs["forecast_month"] = forecast_month.strftime("%b %Y")
     return template_df
+
+
+def build_multisheet_history_template(sku_frame: pd.DataFrame, months: int = 6) -> dict[str, pd.DataFrame]:
+    last_closed_month = pd.Timestamp.today().normalize().replace(day=1) - pd.offsets.MonthBegin(1)
+    recent_months = pd.date_range(end=last_closed_month, periods=months, freq="MS")
+    sheets: dict[str, pd.DataFrame] = {}
+
+    base_rows = sku_frame[["Variant ID", "Name", "Brand", "Category"]].drop_duplicates().copy()
+    for month in recent_months:
+        sheet_df = base_rows.copy()
+        sheet_df["Projection"] = ""
+        sheet_df["Actual Sold"] = ""
+        sheets[month.strftime("%Y-%m")] = sheet_df
+    return sheets
 
 
 def build_production_projection(

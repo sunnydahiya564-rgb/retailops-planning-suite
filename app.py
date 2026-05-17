@@ -579,7 +579,7 @@ def main() -> None:
             source_name,
             f"{len(base_df)} SKUs loaded",
             "Demand Projection page available",
-            "Production Planner page available",
+            "Case-size execution logic",
         ],
     )
 
