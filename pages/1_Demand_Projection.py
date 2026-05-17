@@ -48,6 +48,12 @@ def load_sample_planning_data() -> pd.DataFrame:
     return prepare_input_frame(pd.read_csv(SAMPLE_DATA_PATH))
 
 
+@st.cache_data(show_spinner=False)
+def build_cached_projection(history_input, planning_df: pd.DataFrame):
+    artifacts = forecast_next_month(history_input, planning_df)
+    return artifacts.forecast.copy(), dict(artifacts.metrics), artifacts.monthly_history.copy()
+
+
 def resolve_planning_frame(uploaded_planning_file) -> pd.DataFrame:
     if uploaded_planning_file is not None:
         return prepare_input_frame(load_uploaded_table(uploaded_planning_file))
@@ -373,10 +379,8 @@ def main() -> None:
         st.info("Upload monthly sales history or enable sample history to continue.")
         return
 
-    artifacts = forecast_next_month(history_input, planning_df)
-    forecast_df = artifacts.forecast.copy()
-    monthly_history = artifacts.monthly_history.copy()
-    metrics = artifacts.metrics
+    with st.spinner("Building next-month projection from monthly history..."):
+        forecast_df, metrics, monthly_history = build_cached_projection(history_input, planning_df)
 
     category_options = sorted(forecast_df["Category"].dropna().astype(str).unique().tolist())
     brand_options = sorted(forecast_df["Brand"].dropna().astype(str).unique().tolist())

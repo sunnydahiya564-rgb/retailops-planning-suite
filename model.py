@@ -618,9 +618,10 @@ def _train_monthly_model(
             (
                 "regressor",
                 RandomForestRegressor(
-                    n_estimators=350,
-                    max_depth=14,
+                    n_estimators=180,
+                    max_depth=12,
                     min_samples_leaf=2,
+                    max_features="sqrt",
                     random_state=42,
                     n_jobs=-1,
                 ),

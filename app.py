@@ -399,7 +399,8 @@ def render_demand_intelligence(base_df: pd.DataFrame) -> None:
         st.plotly_chart(style_figure(projection_fig, height=380), use_container_width=True, config=PLOTLY_CONFIG)
         return
 
-    forecast_frame, model_metrics = build_demand_preview(base_df)
+    with st.spinner("Building demand preview..."):
+        forecast_frame, model_metrics = build_demand_preview(base_df)
     st.caption("No saved next-month projection is active yet. The preview below uses generated history so planners can still review demand shape.")
     render_metric_cards(
         [
@@ -755,7 +756,7 @@ def main() -> None:
         )
 
     with demand_tab:
-        render_demand_intelligence(edited_df)
+        render_demand_intelligence(base_df)
         st.info(
             "Use the Demand Projection page to upload monthly history, validate last-month projection accuracy, and save next-month demand back into this planning workspace."
         )
